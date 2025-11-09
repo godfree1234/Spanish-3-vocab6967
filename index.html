@@ -565,52 +565,158 @@
     function getStoredGithubToken(){ return localStorage.getItem(GITHUB_TOKEN_KEY) || '' }
     function setStoredGithubToken(t){ if(t) localStorage.setItem(GITHUB_TOKEN_KEY, t); else localStorage.removeItem(GITHUB_TOKEN_KEY); }
 
+    }) } catch(e) { console.error(e); }
+    
     async function validateToken(token){
-      // quick validation: GET /user to verify token and return login
+      if(!token) return null;
+      
       try{
-        const res = await fetch('https://api.github.com/user', { headers: { 'Authorization': `token ${token}` } });
-        if(!res.ok){ const txt = await res.text(); throw new Error(`Token validation failed: ${res.status} ${res.statusText}: ${txt}`); }
+        // Validate token using GitHub API
+        const res = await fetch('https://api.github.com/user', { 
+          headers: { 
+            'Accept': 'application/vnd.github.v3+json',
+            'Authorization': `Bearer ${token}` 
+          }
+        });
+        
+        if(!res.ok){ 
+          const txt = await res.text();
+          if(res.status === 401) {
+            throw new Error('Token is invalid or expired');
+          } else if(res.status === 403) {
+            throw new Error('Token scope may be insufficient (needs gist access)');
+          } else {
+            throw new Error(`Validation failed: ${res.status} ${res.statusText}`);
+          }
+        }
+        
         const body = await res.json();
-        return body.login || null;
-      }catch(e){ throw e; }
+        if(!body || !body.login) {
+          throw new Error('Invalid response from GitHub API');
+        }
+        
+        // Also verify gist scope
+        const scopeRes = await fetch('https://api.github.com/user/gists', {
+          headers: {
+            'Accept': 'application/vnd.github.v3+json',
+            'Authorization': `Bearer ${token}`
+          }
+        });
+        
+        if(!scopeRes.ok && scopeRes.status === 403) {
+          throw new Error('Token does not have gist access scope');
+        }
+        
+        return body.login;
+      }catch(e){ 
+        console.error('Token validation error:', e);
+        throw e; 
+      }
     }
 
-    async function publishToGist(createOnly = false){
+    async function publishToGist(createOnly = false) {
       const pw = els.cloudSyncPassword.value || '';
-      if(!requirePasswordMatches(pw)) { els.adminMsg.textContent = 'Enter admin password in cloud sync section to publish.'; return; }
-      try{
-        const token = (els.githubToken.value || getStoredGithubToken()).trim();
-        // if token provided, validate it before proceeding
-        if(token){
-          try{
-            const who = await validateToken(token);
-            if(!who){ els.adminMsg.textContent = 'Token validation failed.'; return; }
-          }catch(err){ els.adminMsg.textContent = `Token invalid: ${err.message}`; console.error(err); return; }
+      if(!requirePasswordMatches(pw)) {
+        els.adminMsg.textContent = 'Enter admin password in cloud sync section to publish.';
+        return;
+      }
+
+      const token = (els.githubToken.value || getStoredGithubToken()).trim();
+      const gistId = (els.gistId.value || getStoredGistId()).trim();
+
+      try {
+        // Always require token for Gist operations
+        if(!token) {
+          els.adminMsg.textContent = 'GitHub token is required. Please provide a valid token.';
+          return;
         }
 
-        const gistIdInput = (els.gistId.value || getStoredGistId()).trim();
+        // Validate token first
+        els.adminMsg.textContent = 'Validating token...';
+        const username = await validateToken(token);
+        if(!username) {
+          els.adminMsg.textContent = 'Token validation failed. Please check your token.';
+          setStoredGithubToken(''); // Clear invalid token
+          return;
+        }
+
+        els.adminMsg.textContent = `Publishing as ${username}...`;
         const content = JSON.stringify(chapters, null, 2);
-        const files = { 'svp_chapters.json': { content } };
 
-        const headers = { 'Content-Type': 'application/json' };
-        if(token) headers['Authorization'] = `token ${token}`;
+        const jsonContent = JSON.stringify(chapters, null, 2);
+        
+        try {
+          let result;
+          if(createOnly || !gistId) {
+            els.adminMsg.textContent = 'Creating new gist...';
+            result = await fetch('https://api.github.com/gists', {
+              method: 'POST',
+              headers: {
+                'Accept': 'application/vnd.github.v3+json',
+                'Content-Type': 'application/json',
+                'Authorization': `token ${token}`
+              },
+              body: JSON.stringify({
+                description: 'Spanish Vocab Practice chapters JSON',
+                public: true,
+                files: {
+                  'svp_chapters.json': { content: jsonContent }
+                }
+              })
+            });
+          } else {
+            els.adminMsg.textContent = 'Updating existing gist...';
+            result = await fetch(`https://api.github.com/gists/${gistId}`, {
+              method: 'PATCH',
+              headers: {
+                'Accept': 'application/vnd.github.v3+json',
+                'Content-Type': 'application/json',
+                'Authorization': `token ${token}`
+              },
+              body: JSON.stringify({
+                files: {
+                  'svp_chapters.json': { content: jsonContent }
+                }
+              })
+            });
+          }
 
-        let res, body;
-        if(createOnly || !gistIdInput){
-          // create new gist (public)
-          res = await fetch('https://api.github.com/gists', {
-            method: 'POST', headers, body: JSON.stringify({ description: 'SVP chapters JSON', public: true, files })
-          });
-        } else {
-          // update existing gist
-          res = await fetch(`https://api.github.com/gists/${gistIdInput}`, {
-            method: 'PATCH', headers, body: JSON.stringify({ files })
-          });
+          if(!result.ok) {
+            const errorText = await result.text();
+            let errorMsg;
+            
+            if(result.status === 401) {
+              errorMsg = 'Authentication failed. Token may be invalid.';
+              setStoredGithubToken(''); // Clear invalid token
+            } else if(result.status === 403) {
+              errorMsg = 'Access denied. Token may not have gist permissions.';
+              setStoredGithubToken(''); // Clear insufficient token
+            } else if(result.status === 404) {
+              errorMsg = 'Gist not found. Please check the gist ID.';
+            } else if(result.status === 422) {
+              errorMsg = 'Invalid request. Please check your data.';
+            } else {
+              errorMsg = `Gist operation failed (${result.status})`;
+            }
+            
+            els.adminMsg.textContent = errorMsg;
+            console.error('Gist API error:', errorText);
+            return;
+          }
+
+          const responseData = await result.json();
+          const newId = responseData.id || gistId;
+          setStoredGistId(newId);
+          if(token) setStoredGithubToken(token);
+          els.gistId.value = newId;
+          els.githubToken.value = '';
+          els.adminMsg.textContent = `Successfully ${createOnly ? 'created' : 'updated'} gist ${newId}`;
         }
-
-        if(!res.ok){ const txt = await res.text(); els.adminMsg.textContent = `Gist publish failed: ${res.status} ${res.statusText}: ${txt}`; console.error('Gist publish error response:', txt); return; }
-        body = await res.json();
-        const newId = body.id || gistIdInput;
+      } catch(e) {
+        console.error('Gist operation failed:', e);
+        els.adminMsg.textContent = `Error: ${e.message || 'Unknown error'}`;
+      }
+          const newId = body.id || gistIdInput;
         setStoredGistId(newId);
         if(token) setStoredGithubToken(token);
         els.gistId.value = newId;
@@ -619,41 +725,106 @@
       }catch(e){ console.error(e); els.adminMsg.textContent = 'Publish failed (see console).'; }
     }
 
-    async function syncFromGist(){
+    async function syncFromGist() {
       const pw = els.cloudSyncPassword.value || '';
-      if(!requirePasswordMatches(pw)) { els.adminMsg.textContent = 'Enter admin password in cloud sync section to sync.'; return; }
-      try{
-        const gistId = (els.gistId.value || getStoredGistId()).trim();
-        if(!gistId){ els.adminMsg.textContent = 'Enter a Gist ID to sync from.'; return; }
-        const token = (els.githubToken.value || getStoredGithubToken()).trim();
-        const headers = {};
-        if(token) headers['Authorization'] = `token ${token}`;
-        const res = await fetch(`https://api.github.com/gists/${gistId}`, { headers });
-  if(!res.ok){ const txt = await res.text(); els.adminMsg.textContent = `Gist fetch failed: ${res.status} ${res.statusText}: ${txt}`; console.error('Gist fetch error response:', txt); return; }
-        const body = await res.json();
-        // find file content (prefer svp_chapters.json)
-        let fileContent = null;
-        if(body.files && body.files['svp_chapters.json']) fileContent = body.files['svp_chapters.json'].content;
-        else {
-          // pick first file
-          const keys = Object.keys(body.files||{});
-          if(keys.length) fileContent = body.files[keys[0]].content;
-        }
-        if(!fileContent){ els.adminMsg.textContent = 'No suitable file found in gist.'; return; }
-        const parsed = JSON.parse(fileContent);
+      if (!requirePasswordMatches(pw)) {
+        els.adminMsg.textContent = 'Enter admin password in cloud sync section to sync.';
+        return;
+      }
 
-        // Ask user whether to overwrite or merge
-        const doOverwrite = confirm('Overwrite local chapters with gist content? (Cancel to merge)');
-        if(doOverwrite){ chapters = parsed; }
-        else { chapters = { ...chapters, ...parsed }; }
-        saveChapters(chapters);
-        populateChapterSelect();
-        setStoredGistId(gistId);
-        if(token) setStoredGithubToken(token);
-        els.gistId.value = gistId;
-        els.githubToken.value = '';
-        els.adminMsg.textContent = 'Sync completed.';
-      }catch(e){ console.error(e); els.adminMsg.textContent = 'Sync failed (see console).'; }
+      try {
+        const gistId = (els.gistId.value || getStoredGistId()).trim();
+        if (!gistId) {
+          els.adminMsg.textContent = 'Enter a Gist ID to sync from.';
+          return;
+        }
+
+        const token = (els.githubToken.value || getStoredGithubToken()).trim();
+        els.adminMsg.textContent = 'Fetching gist...';
+
+        const response = await fetch(`https://api.github.com/gists/${gistId}`, {
+          headers: {
+            'Accept': 'application/vnd.github.v3+json',
+            ...token ? { 'Authorization': `token ${token}` } : {}
+          }
+        });
+
+        if (!response.ok) {
+          let errorMsg = 'Failed to fetch gist';
+          if (response.status === 401) {
+            errorMsg = 'Authentication failed - token may be invalid';
+            setStoredGithubToken('');
+          } else if (response.status === 403) {
+            if (token) {
+              errorMsg = 'Access denied - token may lack permissions';
+              setStoredGithubToken('');
+            } else {
+              errorMsg = 'Rate limit exceeded - try using a token';
+            }
+          } else if (response.status === 404) {
+            errorMsg = 'Gist not found - check the ID';
+          }
+
+          const errorText = await response.text();
+          console.error('Gist fetch error:', errorText);
+          els.adminMsg.textContent = `${errorMsg} (${response.status})`;
+          return;
+        }
+        
+        const gistData = await response.json();
+        
+        if (!gistData.files || !Object.keys(gistData.files).length) {
+          els.adminMsg.textContent = 'Error: No files found in gist';
+          return;
+        }
+
+        // Look for our data file
+        const file = gistData.files['svp_chapters.json'] || gistData.files[Object.keys(gistData.files)[0]];
+        if (!file || !file.content) {
+          els.adminMsg.textContent = 'Error: No content found in gist file';
+          return;
+        }
+
+        try {
+          const parsedData = JSON.parse(file.content);
+          if (!parsedData || typeof parsedData !== 'object') {
+            throw new Error('Invalid data format');
+          }
+
+          // Ask about merge strategy
+          const shouldOverwrite = confirm(
+            'How would you like to handle the sync?\n\n' +
+            'OK = Overwrite local data completely\n' +
+            'Cancel = Merge (keep local data and add missing items)'
+          );
+
+          if (shouldOverwrite) {
+            chapters = parsedData;
+          } else {
+            chapters = mergeChapters(chapters, parsedData);
+          }
+
+          // Save and update UI
+          saveChapters(chapters);
+          populateChapterSelect();
+          
+          // Store successful configuration
+          setStoredGistId(gistId);
+          if (token) setStoredGithubToken(token);
+          els.gistId.value = gistId;
+          els.githubToken.value = '';
+
+          els.adminMsg.textContent = `Sync completed (${shouldOverwrite ? 'overwritten' : 'merged'})`;
+
+        } catch (parseError) {
+          console.error('Failed to parse gist data:', parseError);
+          els.adminMsg.textContent = 'Error: Invalid data format in gist';
+          return;
+        }
+      } catch (error) {
+        console.error('Sync operation failed:', error);
+        els.adminMsg.textContent = `Sync failed: ${error.message || 'Unknown error'}`;
+      }
     }
 
       // --- safe merge-only fetch (no password required) for auto-sync
