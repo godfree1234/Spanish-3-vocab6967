@@ -588,7 +588,7 @@
           });
         }
 
-        if(!res.ok){ const txt = await res.text(); els.adminMsg.textContent = `Gist publish failed: ${res.status} ${res.statusText}`; console.error(txt); return; }
+  if(!res.ok){ const txt = await res.text(); els.adminMsg.textContent = `Gist publish failed: ${res.status} ${res.statusText}: ${txt}`; console.error('Gist publish error response:', txt); return; }
         body = await res.json();
         const newId = body.id || gistIdInput;
         setStoredGistId(newId);
@@ -609,7 +609,7 @@
         const headers = {};
         if(token) headers['Authorization'] = `token ${token}`;
         const res = await fetch(`https://api.github.com/gists/${gistId}`, { headers });
-        if(!res.ok){ els.adminMsg.textContent = `Gist fetch failed: ${res.status} ${res.statusText}`; return; }
+  if(!res.ok){ const txt = await res.text(); els.adminMsg.textContent = `Gist fetch failed: ${res.status} ${res.statusText}: ${txt}`; console.error('Gist fetch error response:', txt); return; }
         const body = await res.json();
         // find file content (prefer svp_chapters.json)
         let fileContent = null;
