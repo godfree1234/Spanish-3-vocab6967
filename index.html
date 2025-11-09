@@ -155,6 +155,7 @@
           </div>
           <div style="display:flex;gap:8px;margin-top:8px">
             <button id="publishGistBtn">Publish to Gist</button>
+            <button id="createGistBtn" class="secondary">Create new gist</button>
             <button id="syncGistBtn" class="secondary">Sync from Gist</button>
           </div>
 
@@ -423,6 +424,7 @@
       quizletPassword: document.getElementById('quizletPassword'),
       importQuizletBtn: document.getElementById('importQuizletBtn'),
   cloudSyncPassword: document.getElementById('cloudSyncPassword'),
+      createGistBtn: document.getElementById('createGistBtn'),
       adminMsg: document.getElementById('adminMsg'),
       curPassword: document.getElementById('curPassword'),
       newPassword: document.getElementById('newPassword'),
@@ -563,11 +565,29 @@
     function getStoredGithubToken(){ return localStorage.getItem(GITHUB_TOKEN_KEY) || '' }
     function setStoredGithubToken(t){ if(t) localStorage.setItem(GITHUB_TOKEN_KEY, t); else localStorage.removeItem(GITHUB_TOKEN_KEY); }
 
-    async function publishToGist(){
+    async function validateToken(token){
+      // quick validation: GET /user to verify token and return login
+      try{
+        const res = await fetch('https://api.github.com/user', { headers: { 'Authorization': `token ${token}` } });
+        if(!res.ok){ const txt = await res.text(); throw new Error(`Token validation failed: ${res.status} ${res.statusText}: ${txt}`); }
+        const body = await res.json();
+        return body.login || null;
+      }catch(e){ throw e; }
+    }
+
+    async function publishToGist(createOnly = false){
       const pw = els.cloudSyncPassword.value || '';
       if(!requirePasswordMatches(pw)) { els.adminMsg.textContent = 'Enter admin password in cloud sync section to publish.'; return; }
       try{
         const token = (els.githubToken.value || getStoredGithubToken()).trim();
+        // if token provided, validate it before proceeding
+        if(token){
+          try{
+            const who = await validateToken(token);
+            if(!who){ els.adminMsg.textContent = 'Token validation failed.'; return; }
+          }catch(err){ els.adminMsg.textContent = `Token invalid: ${err.message}`; console.error(err); return; }
+        }
+
         const gistIdInput = (els.gistId.value || getStoredGistId()).trim();
         const content = JSON.stringify(chapters, null, 2);
         const files = { 'svp_chapters.json': { content } };
@@ -576,19 +596,19 @@
         if(token) headers['Authorization'] = `token ${token}`;
 
         let res, body;
-        if(gistIdInput){
-          // update existing gist
-          res = await fetch(`https://api.github.com/gists/${gistIdInput}`, {
-            method: 'PATCH', headers, body: JSON.stringify({ files })
-          });
-        } else {
+        if(createOnly || !gistIdInput){
           // create new gist (public)
           res = await fetch('https://api.github.com/gists', {
             method: 'POST', headers, body: JSON.stringify({ description: 'SVP chapters JSON', public: true, files })
           });
+        } else {
+          // update existing gist
+          res = await fetch(`https://api.github.com/gists/${gistIdInput}`, {
+            method: 'PATCH', headers, body: JSON.stringify({ files })
+          });
         }
 
-  if(!res.ok){ const txt = await res.text(); els.adminMsg.textContent = `Gist publish failed: ${res.status} ${res.statusText}: ${txt}`; console.error('Gist publish error response:', txt); return; }
+        if(!res.ok){ const txt = await res.text(); els.adminMsg.textContent = `Gist publish failed: ${res.status} ${res.statusText}: ${txt}`; console.error('Gist publish error response:', txt); return; }
         body = await res.json();
         const newId = body.id || gistIdInput;
         setStoredGistId(newId);
@@ -724,7 +744,7 @@
         els.adminChapter.value = '';
         els.adminPassword.value = '';
         // auto-publish if enabled
-        try{ if(els.autoPublish && els.autoPublish.checked){ const token = els.githubToken.value || getStoredGithubToken(); if(token){ publishToGist(pw); } } }catch(e){ console.warn('Auto-publish failed', e); }
+        try{ if(els.autoPublish && els.autoPublish.checked){ const token = els.githubToken.value || getStoredGithubToken(); if(token){ publishToGist(); } } }catch(e){ console.warn('Auto-publish failed', e); }
       } else {
         els.adminMsg.textContent = 'Incorrect password or operation cancelled.';
       }
@@ -740,7 +760,7 @@
       els.adminEs.value=''; els.adminEn.value=''; saveChapters(chapters);
       // auto-publish if enabled and token present
       try{
-        if(els.autoPublish && els.autoPublish.checked){ const token = els.githubToken.value || getStoredGithubToken(); if(token){ publishToGist(pw); } }
+        if(els.autoPublish && els.autoPublish.checked){ const token = els.githubToken.value || getStoredGithubToken(); if(token){ publishToGist(); } }
       }catch(e){ console.warn('Auto-publish failed', e); }
     });
 
@@ -755,7 +775,7 @@
       els.quizletText.value='';
       // auto-publish if enabled and token present
       try{
-        if(els.autoPublish && els.autoPublish.checked){ const token = els.githubToken.value || getStoredGithubToken(); if(token){ publishToGist(pw); } }
+        if(els.autoPublish && els.autoPublish.checked){ const token = els.githubToken.value || getStoredGithubToken(); if(token){ publishToGist(); } }
       }catch(e){ console.warn('Auto-publish failed', e); }
     });
 
@@ -767,7 +787,12 @@
 
     els.publishGistBtn.addEventListener('click', async ()=>{
       els.adminMsg.textContent = 'Publishing...';
-      await publishToGist();
+      await publishToGist(false);
+    });
+
+    els.createGistBtn.addEventListener('click', async ()=>{
+      els.adminMsg.textContent = 'Creating gist...';
+      await publishToGist(true);
     });
 
     els.syncGistBtn.addEventListener('click', async ()=>{
